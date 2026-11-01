@@ -6,6 +6,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.8%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![PyQt5](https://img.shields.io/badge/PyQt5-5.15-41CD52?logo=qt&logoColor=white)](https://pypi.org/project/PyQt5/)
+[![Release](https://img.shields.io/github/v/release/iamhieuxz/autoshutdown?label=Download&color=22C55E)](https://github.com/iamhieuxz/autoshutdown/releases/latest)
 [![License](https://img.shields.io/badge/License-MIT-22C55E)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows-0078D4?logo=windows)](https://www.microsoft.com/windows)
 
@@ -47,6 +48,15 @@
 ---
 
 ## 🚀 Cài đặt
+
+## 📥 Tải về
+
+<div align="center">
+
+[![Release](https://img.shields.io/github/v/release/iamhieuxz/autoshutdown?label=v1.0.0&color=22C55E&style=for-the-badge)](https://github.com/iamhieuxz/autoshutdown/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/iamhieuxz/autoshutdown/total?label=Downloads&color=0078D4&style=for-the-badge)](https://github.com/iamhieuxz/autoshutdown/releases)
+
+</div>
 
 ### Cách 1: Tải file `.exe` (khuyến nghị)
 
