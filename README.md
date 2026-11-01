@@ -22,6 +22,7 @@
 | 🔌 | **Đóng cổng mạng** | Đóng toàn bộ cổng đang mở trước khi tắt máy. Tự bảo vệ các tiến trình hệ thống. |
 | ⏰ | **Hẹn giờ bật máy** | Task Scheduler với `WakeToRun` — máy tự bật lại đúng giờ dù đã tắt hoàn toàn. |
 | 🎨 | **Flip-clock đếm ngược** | Pop-up đồng hồ lật từng chữ số, neo ở góc dưới bên phải, kéo thả được. |
+| 🔘 | **Tự thu gọn** | Không rê chuột 30s → panel thu vào mép màn hình, chỉ lộ 1/3 vòng tròn. Rê chuột vào là hiện lại. |
 | 🎚️ | **Độ trong suốt** | Chỉnh 30%–100% cho pop-up đếm ngược, vị trí được ghi nhớ. |
 | 🖥️ | **Chạy ẩn** | Nằm gọn trong system tray, không chiếm taskbar. |
 
@@ -42,6 +43,10 @@
 ### Đếm ngược flip-clock
 
 <img src="docs/screenshot-countdown.png" alt="Pop-up đếm ngược" width="320">
+
+### Tự thu gọn vào mép màn hình
+
+<img src="docs/screenshot-peek.png" alt="Vòng tròn thu gọn ở mép màn hình" width="120">
 
 </div>
 
@@ -118,6 +123,16 @@ Sau khi đặt lịch, một pop-up flip-clock xuất hiện ở **góc dưới 
 - **Kéo** để di chuyển — vị trí được ghi nhớ lại.
 - **⚙** để chỉnh độ trong suốt.
 - **Hủy** để hủy lịch tắt máy ngay lập tức.
+
+#### Tự thu gọn khi không dùng
+
+Nếu bạn không rê chuột vào pop-up trong **30 giây**, panel tự thu nhỏ thành một **vòng tròn nhỏ** chui vào mép màn hình (trái hoặc phải, tùy vị trí hiện tại):
+
+- Chỉ **1/3 vòng tròn** hiện ra, phần còn lại nằm khuất ngoài màn hình.
+- Vòng cung màu cyan hiển thị tiến trình, giữa vòng tròn là thời gian còn lại dạng rút gọn (`1h02`, `05:30`).
+- **Rê chuột vào vòng tròn** → pop-up đầy đủ hiện lại ngay lập tức.
+
+> Nhờ vậy pop-up không vướng vào công việc đang mở mà thông tin đếm ngược vẫn luôn nhìn thấy được.
 
 ### Đóng cổng mạng
 

@@ -1148,8 +1148,99 @@ class OpacityPopup(QWidget):
             self.on_change(value)
 
 
+class PeekIndicator(QWidget):
+    """A circular progress ring that peeks out from the screen edge.
+
+    Only a fraction of the circle stays visible so the card does not clutter
+    the desktop. Hovering it brings the full countdown panel back.
+    """
+
+    DIAMETER = 84
+    VISIBLE_RATIO = 3  # only 1/3 of the circle is shown
+
+    def __init__(self, on_expand=None, parent=None):
+        super().__init__(
+            parent, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
+        )
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setFixedSize(self.DIAMETER, self.DIAMETER)
+        self.setCursor(Qt.PointingHandCursor)
+        self.on_expand = on_expand
+        self.progress = 0.0
+        self.remaining_text = ""
+
+    def set_state(self, progress, remaining_text):
+        self.progress = max(0.0, min(1.0, progress))
+        self.remaining_text = remaining_text
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        size = self.DIAMETER
+        inset = 5
+        box = QRectF(inset, inset, size - inset * 2, size - inset * 2)
+
+        painter.setBrush(QColor(11, 18, 32, 235))
+        painter.setPen(QPen(QColor(Token.border), 1))
+        painter.drawEllipse(box)
+
+        track = QPen(QColor(Token.border), 7)
+        track.setCapStyle(Qt.RoundCap)
+        painter.setPen(track)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawArc(box, 0, 360 * 16)
+
+        if self.progress > 0:
+            arc = QPen(QColor(Token.accent), 7)
+            arc.setCapStyle(Qt.RoundCap)
+            painter.setPen(arc)
+            painter.drawArc(box, 90 * 16, -int(self.progress * 360 * 16))
+
+        font = QFont("Segoe UI", 0)
+        font.setBold(True)
+        font.setPixelSize(17)
+        painter.setFont(font)
+        painter.setPen(QColor(Token.text_primary))
+        painter.drawText(box, Qt.AlignCenter, self.remaining_text)
+
+    def enterEvent(self, event):
+        if self.on_expand:
+            self.on_expand()
+        event.accept()
+
+    def place_at_edge(self, side, anchor):
+        """Tuck the ring against a screen edge so only 1/3 of it stays visible."""
+        screen = QApplication.desktop().screenGeometry()
+        visible = self.DIAMETER / self.VISIBLE_RATIO
+        hidden = self.DIAMETER - visible
+
+        if side == "right":
+            # Only the right third of the circle remains on screen.
+            x = screen.right() - visible + 1
+        else:
+            x = screen.left() - hidden + 1
+
+        # Keep the ring at the same height as the panel so it never jumps.
+        if anchor is not None:
+            y = anchor.y() - self.DIAMETER // 2
+        else:
+            y = screen.bottom() - self.DIAMETER + 1
+
+        y = max(screen.top() - hidden, min(y, screen.bottom() - visible + 1))
+        self.move(int(x), int(y))
+
+
 class CountdownPanel(QWidget):
-    """Draggable always-on-top flip-clock countdown card."""
+    """Draggable always-on-top flip-clock countdown card.
+
+    After a period without mouse interaction the card shrinks into a small
+    progress ring tucked against the screen edge. Hovering the ring restores
+    the full card.
+    """
+
+    IDLE_MS = 30000
 
     def __init__(self):
         super().__init__()
@@ -1164,8 +1255,15 @@ class CountdownPanel(QWidget):
         self.clean_ports_on_shutdown = False
         self._drag_position = None
         self._opacity_popup = None
+        self._peek = None
+        self._peek_side = "right"
+        self._idle_timer = QTimer(self)
+        self._idle_timer.setSingleShot(True)
+        self._idle_timer.setInterval(self.IDLE_MS)
+        self._idle_timer.timeout.connect(self.collapse_to_edge)
         self.setup_ui()
         self.move_to_corner()
+        self._idle_timer.start()
 
     def setup_ui(self):
         container = QFrame(self)
@@ -1228,6 +1326,81 @@ class CountdownPanel(QWidget):
 
         self.setStyleSheet(build_stylesheet())
 
+    # -- collapse / expand --------------------------------------------------
+    def _ensure_peek(self):
+        if self._peek is None:
+            self._peek = PeekIndicator(on_expand=self.expand_from_edge)
+        return self._peek
+
+    def _nearest_side(self):
+        """Pick the screen edge closest to the panel anchor."""
+        screen = QApplication.desktop().screenGeometry()
+        center_x = self.x() + self.width() // 2
+
+        if abs(screen.right() - center_x) <= abs(center_x - screen.left()):
+            return "right"
+        return "left"
+
+    def collapse_to_edge(self):
+        """Shrink the panel into a ring tucked against the nearest screen edge."""
+        if self._peek is None:
+            self._ensure_peek()
+        if self._peek.isVisible():
+            return
+
+        self._peek_side = self._nearest_side()
+        anchor = QPointF(self.x() + self.width() / 2, self.y() + self.height() / 2)
+        self._peek.set_state(self._current_progress(), self._current_short_text())
+        self._peek.place_at_edge(self._peek_side, anchor)
+        self._peek.show()
+        self._peek.raise_()
+
+        self.hide()
+        self._idle_timer.stop()
+
+    def expand_from_edge(self):
+        """Restore the full panel when the ring is hovered."""
+        if self._peek:
+            self._peek.hide()
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self._idle_timer.start()
+
+    def _current_progress(self):
+        if not self.deadline or not self.total_seconds:
+            return 0.0
+        remaining = QDateTime.currentDateTime().secsTo(self.deadline)
+        if remaining < 0:
+            remaining = 0
+        elapsed = self.total_seconds - remaining
+        return max(0.0, min(1.0, elapsed / self.total_seconds))
+
+    def _current_short_text(self):
+        if not self.deadline:
+            return "--:--"
+        remaining = QDateTime.currentDateTime().secsTo(self.deadline)
+        if remaining <= 0:
+            return "00:00"
+        minutes = remaining // 60
+        secs = remaining % 60
+        if minutes >= 60:
+            return f"{minutes // 60}h{minutes % 60:02d}"
+        return f"{minutes:02d}:{secs:02d}"
+
+    def _refresh_peek(self):
+        if self._peek and self._peek.isVisible():
+            self._peek.set_state(self._current_progress(), self._current_short_text())
+
+    # -- mouse tracking -----------------------------------------------------
+    def enterEvent(self, event):
+        self._idle_timer.start()
+        event.accept()
+
+    def leaveEvent(self, event):
+        self._idle_timer.start()
+        event.accept()
+
     # -- opacity ------------------------------------------------------------
     def apply_opacity(self, value):
         self.setWindowOpacity(max(0.3, min(1.0, value / 100.0)))
@@ -1284,9 +1457,13 @@ class CountdownPanel(QWidget):
             event.accept()
 
     def mouseMoveEvent(self, event):
+        # Any pointer movement counts as interaction and keeps the card open.
+        self._idle_timer.start()
         if self._drag_position and event.buttons() & Qt.LeftButton:
             self.move(event.globalPos() - self._drag_position)
             event.accept()
+        else:
+            super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
         self._drag_position = None
@@ -1313,6 +1490,7 @@ class CountdownPanel(QWidget):
         self.show()
         self.raise_()
         self.activateWindow()
+        self._idle_timer.start()
 
     def update_countdown(self):
         if self.deadline is None:
@@ -1320,11 +1498,13 @@ class CountdownPanel(QWidget):
         remaining = QDateTime.currentDateTime().secsTo(self.deadline)
         if remaining <= 0:
             self.clock.set_time(0, 0, 0, animate=False)
+            self._refresh_peek()
             return
         hours = remaining // 3600
         minutes = (remaining % 3600) // 60
         secs = remaining % 60
         self.clock.set_time(hours, minutes, secs)
+        self._refresh_peek()
 
     def request_cancel(self):
         app = QApplication.instance()
@@ -1332,6 +1512,9 @@ class CountdownPanel(QWidget):
             app.cancel_countdown()
 
     def hide_panel(self):
+        self._idle_timer.stop()
+        if self._peek:
+            self._peek.hide()
         self.hide()
 
 
