@@ -74,7 +74,7 @@ Bản cập nhật bổ sung **tính năng tự thu gọn** cho pop-up đếm ng
 ### 🔐 Checksum
 
 ```
-SHA256: (xem tại trang download asset)
+SHA256: `5ACC9922BECEE05CEBFD818866A7AA11C52B2CDF78DEBC829A9A1A6A6030BE86`
 ```
 
 ---
