@@ -49,7 +49,8 @@ def app_command():
     """Return the (executable, arguments) used to relaunch this application."""
     if getattr(sys, "frozen", False):
         return sys.executable, WAKE_FLAG
-    return sys.executable, f'"{os.path.abspath(sys.argv[0])}" {WAKE_FLAG}'
+    # No quotes: PowerShell script will quote the entire argument string.
+    return sys.executable, f'{os.path.abspath(sys.argv[0])} {WAKE_FLAG}'
 
 
 def next_occurrence(clock_time):
@@ -157,7 +158,8 @@ def _format_boundary(value):
     """Turn a Task Scheduler StartBoundary into a readable local time."""
     from datetime import datetime
 
-    text = value.split("+")[0].rstrip("Z")
+    # Handle both positive and negative timezone offsets: +07:00 or -05:00
+    text = value.split("+")[0].split("-")[0].rstrip("Z")
     for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M"):
         try:
             return datetime.strptime(text, fmt).strftime("%d/%m/%Y %H:%M")

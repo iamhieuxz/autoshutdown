@@ -66,7 +66,7 @@ def _run(command):
         capture_output=True,
         text=True,
         encoding="utf-8",
-        errors="ignore",
+        errors="replace",  # keep trace of decoding errors
     )
 
 

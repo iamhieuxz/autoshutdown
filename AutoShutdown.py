@@ -111,8 +111,15 @@ class Token:
     danger_soft = "#3B1A1E"
 
 
+_STYLESHEET_CACHE = None
+
+
 def build_stylesheet():
-    return f"""
+    global _STYLESHEET_CACHE
+    if _STYLESHEET_CACHE is not None:
+        return _STYLESHEET_CACHE
+    
+    _STYLESHEET_CACHE = f"""
         #container {{
             background: {Token.surface};
             border: 1px solid {Token.border};
@@ -395,6 +402,7 @@ def build_stylesheet():
             border-color: {Token.accent_hover};
         }}
     """
+    return _STYLESHEET_CACHE
 
 
 class ModernPopup(QWidget):
@@ -404,6 +412,10 @@ class ModernPopup(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setFixedSize(500, 470)
         self._drag_position = None
+        self._persist_timer = QTimer(self)
+        self._persist_timer.setSingleShot(True)
+        self._persist_timer.setInterval(500)
+        self._persist_timer.timeout.connect(self._do_persist_position)
         self.setup_ui()
         self.move_to_default_position()
         self._restore_position(load_settings().get("popup_pos"))
@@ -431,6 +443,10 @@ class ModernPopup(QWidget):
             self.move(x, y)
 
     def _persist_position(self):
+        """Debounced: only save after 500ms without movement."""
+        self._persist_timer.start()
+
+    def _do_persist_position(self):
         settings = load_settings()
         settings["popup_pos"] = [self.x(), self.y()]
         save_settings(settings)
@@ -750,6 +766,7 @@ class ModernPopup(QWidget):
         self.clean_button.clicked.connect(self.clean_ports)
         layout.addWidget(self.clean_button)
 
+        # Delay initial load so the UI appears responsive.
         QTimer.singleShot(150, self.refresh_ports)
         return page
 
@@ -1275,6 +1292,10 @@ class CountdownPanel(QWidget):
         self._idle_timer.setSingleShot(True)
         self._idle_timer.setInterval(self.IDLE_MS)
         self._idle_timer.timeout.connect(self.collapse_to_edge)
+        self._persist_timer = QTimer(self)
+        self._persist_timer.setSingleShot(True)
+        self._persist_timer.setInterval(500)
+        self._persist_timer.timeout.connect(self._do_persist_position)
         self.setup_ui()
         self.move_to_corner()
         self._idle_timer.start()
@@ -1461,6 +1482,10 @@ class CountdownPanel(QWidget):
         )
 
     def _persist_position(self):
+        """Debounced: only save after 500ms without movement."""
+        self._persist_timer.start()
+
+    def _do_persist_position(self):
         settings = load_settings()
         settings["panel_pos"] = [self.x(), self.y()]
         save_settings(settings)
@@ -1685,7 +1710,17 @@ class AutoShutdownApp:
         )
 
         # Restart the shutdown timer so the power off starts right after cleanup.
-        subprocess.run(["shutdown", "/s", "/t", "0"], capture_output=True)
+        result = subprocess.run(["shutdown", "/s", "/t", "0"], capture_output=True)
+        if result.returncode != 0:
+            self.countdown_panel.status_label.setText(
+                "Lỗi: không thể tắt máy (cần quyền admin)"
+            )
+            self.tray.showMessage(
+                "Lỗi tắt máy",
+                "Windows từ chối lệnh tắt máy. Cần chạy app với quyền admin.",
+                QSystemTrayIcon.Critical,
+                5000,
+            )
 
     def quick_clean_ports(self):
         entries = port_cleaner.list_bound_ports()
@@ -1729,7 +1764,7 @@ class AutoShutdownApp:
         if "--woke" in sys.argv:
             self.tray.showMessage(
                 "Máy đã tự bật lại",
-                "Thứ bậy máy theo lịch đã hẹn đã hoàn tất.",
+                "Máy đã tự bật theo lịch đã hẹn.",
                 QSystemTrayIcon.Information,
                 5000,
             )
