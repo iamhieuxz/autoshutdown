@@ -71,8 +71,9 @@ def schedule_wake(hour, minute):
     when = next_occurrence((hour, minute))
     executable, arguments = app_command()
 
-    # S4U lets the task run at boot even though nobody has logged in yet,
-    # which is exactly the case a wake-up task has to survive.
+    # Interactive is deliberate: the RTC alarm is armed either way, but only
+    # this logon type starts the app in the user's own session, so the tray
+    # icon and the "machine woke up" notice are actually visible.
     script = (
         "$ErrorActionPreference = 'Stop'\n"
         f"$action = New-ScheduledTaskAction -Execute '{_ps_quote(executable)}' "
@@ -83,7 +84,7 @@ def schedule_wake(hour, minute):
         "-AllowStartIfOnBatteries -DontStopIfGoingOnBatteries "
         "-ExecutionTimeLimit (New-TimeSpan -Minutes 5)\n"
         "$principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME "
-        "-LogonType S4U -RunLevel Highest\n"
+        "-LogonType Interactive -RunLevel Highest\n"
         f"Register-ScheduledTask -TaskName '{TASK_NAME}' -Action $action "
         "-Trigger $trigger -Settings $settings -Principal $principal "
         "-Force | Out-Null\n"
