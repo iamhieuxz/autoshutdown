@@ -567,7 +567,7 @@ class ModernPopup(QWidget):
 
         note = QLabel(
             "Máy sẽ tự bật lại đúng giờ đã chọn, kể cả khi đã tắt hoàn toàn. "
-            "Cần bật Wake-on-LAN/RTC trong BIOS và cấp quyền quản trị."
+            "Cần bật 'Wake on RTC alarm' trong BIOS/UEFI và chạy app với quyền quản trị."
         )
         note.setObjectName("hint")
         note.setWordWrap(True)
@@ -607,14 +607,28 @@ class ModernPopup(QWidget):
             selected.hour(), selected.minute()
         )
         if success:
-            self.wake_status.setText(f"Đã hẹn bật máy lúc {message}")
+            # A registered task is not enough: Windows must have armed an RTC
+            # wake timer, otherwise the machine stays off.
+            armed = wake_scheduler.wake_timer_armed()
+            if armed:
+                self.wake_status.setText(f"Đã hẹn bật máy lúc {message}")
+                notice = f"Máy sẽ tự bật lại lúc {message}."
+            else:
+                self.wake_status.setText(
+                    f"Đã đặt lịch lúc {message}, nhưng Windows chưa bật timer RTC."
+                )
+                notice = (
+                    "Lịch đã được tạo nhưng Windows chưa bật timer đánh thức RTC.\n"
+                    "Hãy bật 'Wake on RTC alarm' trong BIOS/UEFI, "
+                    "hoặc dùng Wake-on-LAN."
+                )
             app = QApplication.instance()
             if hasattr(app, "tray"):
                 app.tray.showMessage(
-                    "Đã hẹn giờ bật máy",
-                    f"Máy sẽ tự bật lại lúc {message}.",
-                    QSystemTrayIcon.Information,
-                    3000,
+                    "Hẹn giờ bật máy",
+                    notice,
+                    QSystemTrayIcon.Information if armed else QSystemTrayIcon.Warning,
+                    4000,
                 )
         else:
             self.wake_status.setText(f"Không hẹn được: {message}")

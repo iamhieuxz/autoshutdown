@@ -46,11 +46,10 @@ def _run_powershell(script, timeout=30):
 
 
 def app_command():
-    """Return the command used to relaunch this application."""
+    """Return the (executable, arguments) used to relaunch this application."""
     if getattr(sys, "frozen", False):
-        return f'"{sys.executable}" {WAKE_FLAG}'
-    script = os.path.abspath(sys.argv[0])
-    return f'"{sys.executable}" "{script}" {WAKE_FLAG}'
+        return sys.executable, WAKE_FLAG
+    return sys.executable, f'"{os.path.abspath(sys.argv[0])}" {WAKE_FLAG}'
 
 
 def next_occurrence(clock_time):
@@ -70,19 +69,21 @@ def schedule_wake(hour, minute):
     Returns (success, message).
     """
     when = next_occurrence((hour, minute))
-    action = app_command()
+    executable, arguments = app_command()
 
+    # S4U lets the task run at boot even though nobody has logged in yet,
+    # which is exactly the case a wake-up task has to survive.
     script = (
         "$ErrorActionPreference = 'Stop'\n"
-        f"$action = New-ScheduledTaskAction -Execute 'cmd.exe' "
-        f"-Argument '/c {action}'\n"
+        f"$action = New-ScheduledTaskAction -Execute '{_ps_quote(executable)}' "
+        f"-Argument '{_ps_quote(arguments)}'\n"
         "$trigger = New-ScheduledTaskTrigger -Once -At "
         f"'{when.strftime('%Y-%m-%dT%H:%M:%S')}'\n"
         "$settings = New-ScheduledTaskSettingsSet -WakeToRun -StartWhenAvailable "
         "-AllowStartIfOnBatteries -DontStopIfGoingOnBatteries "
         "-ExecutionTimeLimit (New-TimeSpan -Minutes 5)\n"
         "$principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME "
-        "-LogonType Interactive -RunLevel Highest\n"
+        "-LogonType S4U -RunLevel Highest\n"
         f"Register-ScheduledTask -TaskName '{TASK_NAME}' -Action $action "
         "-Trigger $trigger -Settings $settings -Principal $principal "
         "-Force | Out-Null\n"
@@ -99,6 +100,26 @@ def schedule_wake(hour, minute):
     detail = (result.stderr or result.stdout or "").strip().splitlines()
     message = detail[-1] if detail else "Khong ro nguyen nhan"
     return False, message
+
+
+def _ps_quote(text):
+    """Escape a value for a single-quoted PowerShell string."""
+    return text.replace("'", "''")
+
+
+def wake_timer_armed():
+    """Return True when Windows has actually armed an RTC wake timer.
+
+    A task can be registered and still never wake the machine, so the UI
+    reports this instead of claiming success.
+    """
+    try:
+        result = subprocess.run(
+            ["powercfg", "/waketimers"], capture_output=True, text=True, timeout=15
+        )
+    except (subprocess.SubprocessError, OSError):
+        return False
+    return TASK_NAME in result.stdout
 
 
 def cancel_wake():
@@ -126,4 +147,19 @@ def get_wake_info():
     except (subprocess.SubprocessError, OSError):
         return None
     value = result.stdout.strip()
-    return value or None
+    if not value:
+        return None
+    return _format_boundary(value)
+
+
+def _format_boundary(value):
+    """Turn a Task Scheduler StartBoundary into a readable local time."""
+    from datetime import datetime
+
+    text = value.split("+")[0].rstrip("Z")
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M"):
+        try:
+            return datetime.strptime(text, fmt).strftime("%d/%m/%Y %H:%M")
+        except ValueError:
+            continue
+    return value
