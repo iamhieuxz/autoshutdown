@@ -256,6 +256,8 @@ def icon_pixmap(name, size=22, color=None):
         to_remove = max(1, _ICON_CACHE_MAX // 5)
         for _ in range(to_remove):
             _ICON_CACHE.pop(next(iter(_ICON_CACHE)), None)
+    
+    scale = 3  # supersample, then let the device pixel ratio downscale
     pixmap = QPixmap(size * scale, size * scale)
     pixmap.fill(Qt.transparent)
     painter = QPainter(pixmap)
@@ -313,6 +315,8 @@ def check_icon_path():
     global _CHECK_ICON_PATH
     if _CHECK_ICON_PATH is not None:
         return _CHECK_ICON_PATH
+    
+    # Try to save to temp dir, fallback to memory if it fails
     path = os.path.join(tempfile.gettempdir(), "autoshutdown_check.png")
     pixmap = QPixmap(17, 17)  # 1:1 with the indicator size, Qt does not scale it
     pixmap.fill(Qt.transparent)
@@ -324,8 +328,14 @@ def check_icon_path():
     painter.setPen(pen)
     painter.drawPolyline(QPolygonF([QPointF(3.5, 8.5), QPointF(7, 12), QPointF(13, 4.5)]))
     painter.end()
-    pixmap.save(path)
-    _CHECK_ICON_PATH = path.replace(os.sep, "/")
+    
+    try:
+        pixmap.save(path)
+        _CHECK_ICON_PATH = path.replace(os.sep, "/")
+    except (OSError, RuntimeError):
+        # If temp dir not writable, use memory path marker
+        _CHECK_ICON_PATH = "memory://check"
+    
     return _CHECK_ICON_PATH
 
 
