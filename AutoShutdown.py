@@ -2134,16 +2134,17 @@ class AutoShutdownApp:
         self.shutdown_deadline = None
         self.popup = None
 
-        # The app stays hidden in the tray. Open it from the tray icon.
-        self.tray.showMessage(
-            "Auto Shutdown",
-            "Đang chạy ẩn trong khay hệ thống. Nhấp vào biểu tượng để mở.",
-            QSystemTrayIcon.Information,
-            3000,
-        )
-
-        if self.settings.get("open_on_launch", False):
-            QTimer.singleShot(400, self.show_popup)
+        # Show main menu on launch by default (can be disabled in settings)
+        if self.settings.get("open_on_launch", True):
+            QTimer.singleShot(200, self.show_popup)
+        else:
+            # Still show tray message if menu is disabled
+            self.tray.showMessage(
+                "Auto Shutdown",
+                "Đang chạy ẩn trong khay hệ thống. Nhấp vào biểu tượng để mở.",
+                QSystemTrayIcon.Information,
+                3000,
+            )
 
     def toggle_open_on_launch(self, enabled):
         self.settings["open_on_launch"] = bool(enabled)
