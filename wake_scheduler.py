@@ -4,6 +4,8 @@ Windows exposes this through Task Scheduler: a task flagged with WakeToRun
 triggers the machine's RTC alarm, so the PC boots itself at a given time.
 """
 
+import base64
+import json
 import os
 import subprocess
 import sys
@@ -13,6 +15,10 @@ TASK_NAME = "AutoShutdown Auto Wake"
 
 # The task runs the app with this flag so it can announce the wake-up.
 WAKE_FLAG = "--woke"
+
+# A windowed build has no console, so every console child would flash a cmd
+# window without this flag.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 def _powershell():
@@ -27,22 +33,40 @@ def _powershell():
 
 
 def _run_powershell(script, timeout=30):
-    return subprocess.run(
-        [
-            _powershell(),
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            script,
-        ],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="ignore",
-        timeout=timeout,
+    # Force UTF-8 on stdout: PowerShell 5.1 otherwise writes the console code
+    # page, which does not match the decoding below. Guarded because a build
+    # that runs without any console must not fail on this line.
+    script = (
+        "try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }\n"
+        + script
     )
+    
+    # Retry once if PowerShell fails (in case it restarted)
+    for attempt in range(2):
+        try:
+            return subprocess.run(
+                [
+                    _powershell(),
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    script,
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+                creationflags=_NO_WINDOW,
+            )
+        except (subprocess.SubprocessError, OSError) as e:
+            if attempt == 0:
+                # First attempt failed, retry once
+                continue
+            # Second attempt failed
+            return None
 
 
 def app_command():
@@ -64,6 +88,44 @@ def next_occurrence(clock_time):
     return target
 
 
+def task_state():
+    """Return {"boundary", "wake_to_run"} for the registered task, or None.
+
+    One call answers both "is a task registered" and "will it wake the
+    machine", because a task without the WakeToRun flag never powers the PC on.
+    """
+    script = (
+        "$ErrorActionPreference = 'SilentlyContinue'\n"
+        f"$t = Get-ScheduledTask -TaskName '{TASK_NAME}'\n"
+        "if (-not $t) { return }\n"
+        "[pscustomobject]@{\n"
+        "  boundary = ($t.Triggers | Select-Object -First 1).StartBoundary\n"
+        "  wake_to_run = [bool]$t.Settings.WakeToRun\n"
+        "} | ConvertTo-Json -Compress\n"
+    )
+    result = _run_powershell(script, timeout=20)
+    if result is None:
+        return None
+    text = (result.stdout or "").strip()
+    if not text:
+        return None
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    
+    # Validate required keys exist
+    if "boundary" not in data or "wake_to_run" not in data:
+        return None
+    
+    return {
+        "boundary": str(data.get("boundary") or ""),
+        "wake_to_run": bool(data.get("wake_to_run")),
+    }
+
+
 def schedule_wake(hour, minute):
     """Register a wake-up task for the next occurrence of the given time.
 
@@ -74,33 +136,41 @@ def schedule_wake(hour, minute):
 
     # Interactive is deliberate: the RTC alarm is armed either way, but only
     # this logon type starts the app in the user's own session, so the tray
-    # icon and the "machine woke up" notice are actually visible.
+    # icon and the "machine woke up" notice are actually visible. Limited
+    # integrity keeps registration working without an elevated prompt; the
+    # task only has to show a notification.
+    
+    # Encode exe and args as base64 to avoid PowerShell injection
+    exe_b64 = base64.b64encode(executable.encode('utf-8')).decode('ascii')
+    args_b64 = base64.b64encode(arguments.encode('utf-8')).decode('ascii')
+    
     script = (
         "$ErrorActionPreference = 'Stop'\n"
-        f"$action = New-ScheduledTaskAction -Execute '{_ps_quote(executable)}' "
-        f"-Argument '{_ps_quote(arguments)}'\n"
+        f"$exe = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{exe_b64}'))\n"
+        f"$args = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{args_b64}'))\n"
+        "$action = New-ScheduledTaskAction -Execute $exe -Argument $args\n"
         "$trigger = New-ScheduledTaskTrigger -Once -At "
         f"'{when.strftime('%Y-%m-%dT%H:%M:%S')}'\n"
         "$settings = New-ScheduledTaskSettingsSet -WakeToRun -StartWhenAvailable "
         "-AllowStartIfOnBatteries -DontStopIfGoingOnBatteries "
         "-ExecutionTimeLimit (New-TimeSpan -Minutes 5)\n"
-        "$principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME "
-        "-LogonType Interactive -RunLevel Highest\n"
-        f"Register-ScheduledTask -TaskName '{TASK_NAME}' -Action $action "
+        "$principal = New-ScheduledTaskPrincipal -UserId "
+        "([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) "
+        "-LogonType Interactive -RunLevel Limited\n"
+        f"Register-ScheduledTask -TaskName '{_ps_quote(TASK_NAME)}' -Action $action "
         "-Trigger $trigger -Settings $settings -Principal $principal "
         "-Force | Out-Null\n"
         "Write-Output 'OK'\n"
     )
 
-    try:
-        result = _run_powershell(script, timeout=45)
-    except (subprocess.SubprocessError, OSError) as error:
-        return False, f"Khong the chay PowerShell: {error}"
+    result = _run_powershell(script, timeout=45)
+    if result is None:
+        return False, "Không chạy được PowerShell."
 
     if "OK" in result.stdout:
         return True, when.strftime("%d/%m/%Y %H:%M")
     detail = (result.stderr or result.stdout or "").strip().splitlines()
-    message = detail[-1] if detail else "Khong ro nguyen nhan"
+    message = detail[-1] if detail else "Không rõ nguyên nhân"
     return False, message
 
 
@@ -109,19 +179,32 @@ def _ps_quote(text):
     return text.replace("'", "''")
 
 
-def wake_timer_armed():
-    """Return True when Windows has actually armed an RTC wake timer.
-
-    A task can be registered and still never wake the machine, so the UI
-    reports this instead of claiming success.
-    """
+def _parse_boundary(value):
+    """Parse a Task Scheduler StartBoundary into a local datetime, or None."""
+    # fromisoformat handles +07:00 / -05:00; "Z" is only a Python 3.11 spelling.
     try:
-        result = subprocess.run(
-            ["powercfg", "/waketimers"], capture_output=True, text=True, timeout=15
-        )
-    except (subprocess.SubprocessError, OSError):
-        return False
-    return TASK_NAME in result.stdout
+        dt = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        # Convert to naive local time for consistent comparison
+        if dt.tzinfo is not None:
+            dt = dt.astimezone().replace(tzinfo=None)
+        return dt
+    except ValueError:
+        return None
+
+
+def wake_info():
+    """Return {"time", "armed"} for a wake that can still happen, else None.
+
+    A one-time task stays registered after it fires, so a past StartBoundary
+    must not be reported as an upcoming wake.
+    """
+    state = task_state()
+    if not state or not state["boundary"]:
+        return None
+    when = _parse_boundary(state["boundary"])
+    if when is None or when <= datetime.now():
+        return None
+    return {"time": _format_boundary(state["boundary"]), "armed": state["wake_to_run"]}
 
 
 def cancel_wake():
@@ -131,38 +214,15 @@ def cancel_wake():
         f"if ($task) {{ Unregister-ScheduledTask -TaskName '{TASK_NAME}' "
         "-Confirm:$false; Write-Output 'REMOVED' }"
     )
-    try:
-        result = _run_powershell(script, timeout=25)
-    except (subprocess.SubprocessError, OSError):
+    result = _run_powershell(script, timeout=25)
+    if result is None:
         return False
     return "REMOVED" in result.stdout
 
 
-def get_wake_info():
-    """Return the scheduled wake time as a formatted string, or None."""
-    script = (
-        f"$t = Get-ScheduledTask -TaskName '{TASK_NAME}' -ErrorAction SilentlyContinue; "
-        "if ($t) { $t.Triggers | Select-Object -First 1 -ExpandProperty StartBoundary }"
-    )
-    try:
-        result = _run_powershell(script, timeout=20)
-    except (subprocess.SubprocessError, OSError):
-        return None
-    value = result.stdout.strip()
-    if not value:
-        return None
-    return _format_boundary(value)
-
-
 def _format_boundary(value):
     """Turn a Task Scheduler StartBoundary into a readable local time."""
-    from datetime import datetime
-
-    # Handle both positive and negative timezone offsets: +07:00 or -05:00
-    text = value.split("+")[0].split("-")[0].rstrip("Z")
-    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M"):
-        try:
-            return datetime.strptime(text, fmt).strftime("%d/%m/%Y %H:%M")
-        except ValueError:
-            continue
-    return value
+    when = _parse_boundary(value)
+    if when is None:
+        return value
+    return when.strftime("%d/%m/%Y %H:%M")

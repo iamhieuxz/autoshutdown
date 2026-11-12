@@ -1,9 +1,13 @@
 """Utilities to inspect and release network ports that are currently bound."""
 
+import logging
 import os
 import subprocess
-import sys
 from dataclasses import dataclass, field
+
+# A windowed build has no console, so every console child would flash a cmd
+# window without this flag.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 # Processes that must never be terminated: terminating them breaks Windows.
 PROTECTED_NAMES = {
@@ -36,13 +40,11 @@ PROTECTED_NAMES = {
 }
 
 # Anything living inside the Windows directory is considered part of the OS.
-PROTECTED_PATH_PREFIXES = (
-    os.environ.get("SystemRoot", r"C:\Windows").lower(),
-    os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "system32").lower(),
-)
+PROTECTED_PATH_PREFIXES = (os.environ.get("SystemRoot", r"C:\Windows").lower(),)
 
 # Well-known ports handled by kernel drivers / http.sys - not user processes.
-PROTECTED_PORTS = {135, 137, 138, 139, 445, 5985, 5986, 47001}
+# 53 is DNS: closing the resolver takes the whole network down.
+PROTECTED_PORTS = {53, 135, 137, 138, 139, 445, 5985, 5986, 47001}
 
 
 @dataclass
@@ -52,6 +54,7 @@ class PortEntry:
     protocol: str
     process_name: str = "?"
     exe_path: str = ""
+    known_name: bool = True
     protected: bool = False
     reasons: list = field(default_factory=list)
 
@@ -60,21 +63,34 @@ class PortEntry:
         return f"{self.process_name} (PID {self.pid})"
 
 
-def _run(command):
-    return subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",  # keep trace of decoding errors
-    )
+def _run(command, timeout=20):
+    """Run a console command quietly. Returns None when it cannot run at all."""
+    try:
+        return subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",  # keep trace of decoding errors
+            timeout=timeout,
+            creationflags=_NO_WINDOW,
+        )
+    except subprocess.TimeoutExpired:
+        logging.warning(f"Command {command[0]} timed out after {timeout}s")
+        return None
+    except (OSError, subprocess.SubprocessError) as e:
+        logging.warning(f"Cannot run {command[0]}: {e}")
+        return None
 
 
-def _process_name_map():
-    """Map of pid -> image name using a single tasklist call."""
-    result = _run(["tasklist", "/FO", "CSV", "/NH"])
+def _stdout(result):
+    return result.stdout if result is not None else ""
+
+
+def parse_tasklist(text):
+    """Map pid -> image name from `tasklist /FO CSV /NH` output."""
     names = {}
-    for line in result.stdout.splitlines():
+    for line in text.splitlines():
         parts = [part.strip().strip('"') for part in line.split('","')]
         if len(parts) < 2:
             continue
@@ -82,52 +98,55 @@ def _process_name_map():
             pid = int(parts[1])
         except ValueError:
             continue
-        names[pid] = parts[0]
+        if parts[0]:
+            names[pid] = parts[0]
     return names
 
 
-def _exe_path_map():
-    """Map of pid -> executable path using psutil when available."""
+def _process_info_map():
+    """Return (pid -> name, pid -> exe path), merging tasklist and psutil.
+
+    psutil is the only source for the executable path needed by the
+    Windows-directory guard, and its name is the fallback when tasklist cannot
+    see a pid (otherwise such a process would look unprotected).
+    """
+    names = parse_tasklist(_stdout(_run(["tasklist", "/FO", "CSV", "/NH"])))
+    paths = {}
+    
     try:
         import psutil
+        has_psutil = True
     except ImportError:
-        return {}
-    paths = {}
-    for process in psutil.process_iter(["pid", "exe"]):
-        try:
-            paths[process.info["pid"]] = process.info.get("exe") or ""
-        except Exception:
-            continue
-    return paths
+        has_psutil = False
+    
+    if not has_psutil:
+        return names, paths
+    
+    try:
+        for process in psutil.process_iter(["pid", "name", "exe"]):
+            try:
+                info = process.info
+                pid = info.get("pid")
+                if pid is None:
+                    continue
+                paths[pid] = info.get("exe") or ""
+                name = info.get("name")
+                if name and pid not in names:
+                    names[pid] = name
+            except Exception:
+                continue
+    except Exception:
+        # psutil.process_iter() can fail if processes are being killed/created rapidly
+        pass
+    
+    return names, paths
 
 
-def _is_protected(entry: PortEntry):
-    reasons = []
-    if entry.pid <= 4:
-        reasons.append("tiến trình hệ thống")
-    if entry.process_name.lower() in PROTECTED_NAMES:
-        reasons.append("tiến trình hệ thống")
-    if entry.exe_path:
-        lowered = entry.exe_path.lower()
-        if any(lowered.startswith(prefix) for prefix in PROTECTED_PATH_PREFIXES):
-            reasons.append("nằm trong thư mục Windows")
-    if entry.port in PROTECTED_PORTS:
-        reasons.append("cổng hệ thống")
-    entry.reasons = reasons
-    entry.protected = bool(reasons)
-    return entry.protected
-
-
-def list_bound_ports():
-    """Return every TCP listening and UDP bound port with its owning process."""
-    result = _run(["netstat", "-ano"])
-    names = _process_name_map()
-    paths = _exe_path_map()
-
-    entries = []
+def parse_netstat(text):
+    """Return (protocol, port, pid) for TCP listeners and UDP bound ports."""
+    rows = []
     seen = set()
-
-    for line in result.stdout.splitlines():
+    for line in text.splitlines():
         parts = line.split()
         if len(parts) < 4:
             continue
@@ -143,9 +162,15 @@ def list_bound_ports():
         except ValueError:
             continue
 
+        # TCP rows: proto, local, foreign, state, pid. A listener is the row
+        # whose peer port is 0: the state word is localized on a non-English
+        # Windows (and printed in the OEM code page), so it cannot be matched.
         if protocol == "TCP":
-            state = parts[3].upper() if len(parts) > 3 else ""
-            if state != "LISTENING":
+            if len(parts) < 5:
+                continue
+            foreign = parts[2]
+            peer_port = foreign.rsplit(":", 1)[1] if ":" in foreign else ""
+            if peer_port != "0" and parts[3].upper() != "LISTENING":
                 continue
 
         try:
@@ -157,13 +182,53 @@ def list_bound_ports():
         if key in seen:
             continue
         seen.add(key)
+        rows.append((protocol, port, pid))
+    return rows
 
+
+def _is_protected(entry: PortEntry):
+    """Decide whether a port's process must be left alone.
+
+    Fails closed: an entry whose process could not be identified counts as
+    protected, because killing an unknown SYSTEM process breaks Windows.
+    """
+    reasons = []
+
+    def add(reason):
+        if reason not in reasons:
+            reasons.append(reason)
+
+    if entry.pid <= 4:
+        add("tiến trình hệ thống")
+    if entry.process_name.lower() in PROTECTED_NAMES:
+        add("tiến trình hệ thống")
+    if not entry.known_name:
+        add("không xác định được tiến trình")
+    if entry.exe_path:
+        lowered = entry.exe_path.lower()
+        if any(lowered.startswith(prefix) for prefix in PROTECTED_PATH_PREFIXES):
+            add("nằm trong thư mục Windows")
+    if entry.port in PROTECTED_PORTS:
+        add("cổng hệ thống")
+    entry.reasons = reasons
+    entry.protected = bool(reasons)
+    return entry.protected
+
+
+def list_bound_ports():
+    """Return every TCP listening and UDP bound port with its owning process."""
+    names, paths = _process_info_map()
+
+    entries = []
+    for protocol, port, pid in parse_netstat(_stdout(_run(["netstat", "-ano"]))):
+        name = names.get(pid)
         entry = PortEntry(
             pid=pid,
             port=port,
             protocol=protocol,
-            process_name=names.get(pid, f"PID {pid}"),
+            process_name=name or f"PID {pid}",
             exe_path=paths.get(pid, ""),
+            known_name=name is not None,
         )
         _is_protected(entry)
         entries.append(entry)
@@ -175,18 +240,38 @@ def list_bound_ports():
 def terminate(pid: int) -> bool:
     """Force kill a process and its children."""
     result = _run(["taskkill", "/F", "/T", "/PID", str(pid)])
-    return result.returncode == 0
+    if result is None:
+        return False
+    # 128 = process not found: it is already gone, which is what we wanted.
+    return result.returncode in (0, 128)
 
 
 def release_ports(entries):
-    """Terminate every unprotected entry, returning (killed, failed) lists."""
-    killed = []
-    failed = []
+    """Terminate every unprotected entry, returning (killed, failed) lists.
+
+    One process can own several ports, so the list is grouped by pid: without
+    that, every second port would run taskkill against a pid that is already
+    dead and be reported as a failure.
+    """
+    groups = {}
+    order = []
+    protected_pids = {entry.pid for entry in entries if entry.protected}
     for entry in entries:
         if entry.protected:
             continue
-        if terminate(entry.pid):
-            killed.append(entry)
+        if entry.pid not in groups:
+            groups[entry.pid] = []
+            order.append(entry.pid)
+        groups[entry.pid].append(entry)
+
+    killed = []
+    failed = []
+    for pid in order:
+        group = groups[pid]
+        # Protection wins per process: killing it would take a protected port
+        # down with it, so the whole group stays.
+        if pid in protected_pids or not terminate(pid):
+            failed.extend(group)
         else:
-            failed.append(entry)
+            killed.extend(group)
     return killed, failed
